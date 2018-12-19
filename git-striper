@@ -1,0 +1,345 @@
+#!/bin/bash 
+#====================================================================
+# NAME      :   git-striper
+# AUTHOR    :   Andrys Jiri
+# DATE      :   2018.12.18
+VERSION='0.1'
+#
+# DEPENDENCIES :
+#               Binaries: bash, grep, awk, mkdir, tar, git
+#                         losetup, kpartx, mount, id, 
+#
+#====================================================================
+
+CURWD=$(pwd)
+#TMPGITDIR="${CURWD}/TMP"
+REPO_DEST="${CURWD}/SEND"
+
+
+git-pack(){
+    local _git_archive_name=$1
+    local _base_dir=$2
+    local _repo_name=$3
+    
+    echo -e "\n  GIT-PACK:"
+    if [ -e "${_git_archive_name}" ]; then
+      echo -e "  >REMOVING  -${_git_archive_name}-"
+      rm -rf "${_git_archive_name}"    
+    fi
+    
+    
+    echo -e "  >CREATING ARCHIVE: -${_git_archive_name}- "
+    tar cJf "${_git_archive_name}" -C "${_base_dir}" "${_repo_name}"
+    _ret=$?
+    if [ ! ${_ret} -eq 0 ]; then
+      echo -e "\n  ERROR: git-pack: Unable to create archive.Exiting"
+      return 4
+    else
+      echo -e "  >>OK\n"
+      return 0
+    fi
+    
+    return 11
+    
+}
+
+
+git-verify(){
+    local _git_repo=$1
+    
+    tmp="${_git_repo##*/}"
+    
+    echo -e "\n  GIT-VERIFY:[${tmp}]"
+    echo -e "  >COMMIT COUNT"
+    #A)We can check if we have only one object with commit type, if more, or zero ->fail, we shoud have only one commit in history
+    ccnt=$(cd ${_git_repo}; IFS=$'\n'; bla=( $(git verify-pack -v .git/objects/pack/pack-*.idx | egrep "(commit)") ); echo "${#bla[@]}")
+    if [ ! "${ccnt}" -eq 1 ]; then 
+        echo -e "  ERROR: git-verify: Git includes ${ccnt} commits objects !\n         Must not be send to customer.Exiting "
+        return 1
+    fi
+    
+    
+    echo -e "  >SHA1-SUM"
+    #B)We can check all checkouted files and compare with objects inside git structure: check hash only sum of hashes ???
+    #B.1)Sum of hashes in git object db
+    sumsha1_git=$(cd ${_git_repo}; IFS=$'\n';unset __sumsha1_gitobj
+                  objects=$(git verify-pack -v .git/objects/pack/pack-*.idx | egrep "(blob)" );
+                      for obj in $objects; do
+                          sha1=$(echo ${obj} | awk '{ print $1 }' ) 
+                          #fpath=$(git rev-list --all --objects | grep ${sha1} |  awk '{ print $2 }' )
+                          ((__sumsha1_gitobj+=0x${sha1:0:6}))
+                          #echo -e "${sha1:0:6}>gpath:./${fpath}"
+                      done
+                  echo "${__sumsha1_gitobj}"
+    )
+    
+    #B.2)Sum of hashes in checkout dir
+    #max number is higher than > 1000 000 000 000 000 000
+    #0xFFFFF=1048575
+    #1000 000 000 000 000 000/1048575= 953 675 225 901 files ...any no repository has so many files
+    # Tested with :
+    #     URL: https://github.com/torvalds/linux.git
+    #     TAG: v4.20-rc5
+    # 
+    #     - around 66 000 objects
+    #     - fetch: 4minutes 
+    #     - verification: 8 minutes 
+    #
+    #    SHA1-SUM->GIT-OBJECTS   : 521871993115
+    #    SHA1-SUM->CHECKOUT-FILES: 521871993115
+    #
+    #    git-verify: Git does not include more data than given commit
+    #    git-verify: > OK
+    
+    unset fls_list_sha1;  
+    unset sumsha1_checkoutfls_sha1u;
+    arrfls_nolnks=( $(find "${_git_repo}" -type f -not -path "*/.git/*") )
+    for fle in ${arrfls_nolnks[@]}; do
+        sha1=$(git hash-object "${fle}") 
+        fls_list_sha1+=( "${sha1}" )
+        #((sumsha1_checkoutfls+=0x${sha1:0:6}))
+        #echo -e "${sha1:0:6}>fpath:${fle}"
+    done
+
+    arrfls_lnks=( $(find "${_git_repo}" -type l -not -path "*/.git/*") )
+    for fle in ${arrfls_lnks[@]}; do
+        sha1=$(echo -n $(readlink "${fle}") | git hash-object --stdin) 
+        fls_list_sha1+=( "${sha1}" )
+        #((sumsha1_checkoutfls+=0x${sha1:0:6}))
+        #echo -e "${sha1:0:6}>fpath:${fle}"
+    done
+  
+    uarr=( $(printf '%s\n' "${fls_list_sha1[@]}" | sort | uniq ) )
+    for sha1u in ${uarr[@]}; do
+        ((sumsha1_checkoutfls_sha1u+=0x${sha1u:0:6}))
+    done
+  
+    echo -e "  >>SHA1-SUM->GIT-OBJECTS   : ${sumsha1_git}"
+    echo -e "  >>SHA1-SUM->CHECKOUT-FILES: ${sumsha1_checkoutfls_sha1u}"
+    
+    
+    if [ ! ${sumsha1_git} ] || [ ! ${sumsha1_checkoutfls_sha1u} ]; then
+        echo -e "  ERROR: git-verify:  Check error,  sumsha1* have to be initialized !\n         Must not be send to customer.Exiting "
+        return 2        
+    fi
+    
+    if [ ${sumsha1_git} -eq ${sumsha1_checkoutfls_sha1u} ] && [  ${sumsha1_checkoutfls_sha1u} -gt 0 ] && [ ${sumsha1_git} -gt 0 ]; then
+        echo -e "  >>Identical SHA1-SUM. Git does not include more data than given commit"
+        echo -e "  >>OK"
+        return 0
+    else
+        echo -e "  ERROR: git-verify:  SHA1-SUM Check error.  !\n         Must not be send to customer.Exiting "
+        return 3 
+    fi
+    
+    #git fsck --unreachable; 
+    #git fsck --full --dangling ;
+   
+   #Just for case of some other error
+   return 10
+}
+
+git-create() {
+    local _git_repo=$1
+    local _git_rurl=$2
+    local _git_rtag=$3
+    
+    oldpwd=$(pwd)
+    
+    echo -e "  GIT-CREATE:" 
+    if [ -e "${_git_repo}" ]; then
+      rm -rf "${_git_repo}"
+      echo -e "  >REMOVING: -${_git_repo}- \n"
+      ret_=$?;
+      [ ${ret_} -eq 0 ] || { echo -e "\n  ERROR: Can not remove folder ${_git_repo}"; return ${ret_}; } 
+    fi
+    
+    
+    mkdir -p "${_git_repo}"
+    ret_=$?;
+    [ ${ret_} -eq 0 ] || { echo -e "\n  ERROR: Can not create folder ${_git_repo}"; return ${ret_}; }
+    
+    cd "${_git_repo}"
+    git init
+    ret_=$?;
+    [ ${ret_} -eq 0 ] || { echo -e "\n  ERROR: git init in folder ${_git_repo}"; return ${ret_}; }
+    
+    git remote add origin "${_git_rurl}"
+    
+    git fetch origin "refs/tags/${_git_rtag}:refs/tags/${_git_rtag}" --depth="1"
+    ret_=$?;
+    [ ${ret_} -eq 0 ] || { echo -e "\n  ERROR: git fetch "; return ${ret_}; }    
+    
+    git reset --hard FETCH_HEAD
+    git gc --aggressive --prune=all
+    git prune --progress
+    git repack -ad
+    git reflog expire --expire=now --all
+    
+    cd "${oldpwd}"
+    
+    return 0
+}
+
+
+
+help_desc() {
+echo -e "\
+  Usage:  git-striper OPTIONS
+
+  Strips all history data from git with exception of one requested commit. 
+  Executes verification if data(ignore changes in paths) in checkout directory are the same as in git objects(SHA1-SUM). 
+  
+  Asks for URL and TAG of git repository.
+  
+  Result is tar.xz archive .
+  
+
+  OPTION: { --version }
+  |  > Version information
+  |
+
+  OPTION: { --verify-only | -v }
+  |  > Run verification. Compare if data in checkout directory are the same as in git objects(SHA1-SUM).Ignore changes in paths.
+  |
+"
+}
+
+dependencies_test() {
+  #format: all commands here are in format "CMDNAME SOME_PARAMETERS RETURN_VALUE"
+
+   for cmd in "${DEPENDENCIES_LIST[@]}"; do 
+    #
+    sub_cmd_arr=( ${cmd} )
+    lst="${#sub_cmd_arr[@]}"
+    sub_cmd="${sub_cmd_arr[@]:0:lst-1}"
+    cmd_only=${sub_cmd_arr[0]}
+    exp_retval="${sub_cmd_arr[@]: -1}"
+    #
+    
+    retval=$( ${sub_cmd} &>/dev/null)
+    retval=$?
+    if [ "${retval}" != "${exp_retval}" ] && [ "${retval}" != "0" ]; then
+      echo -e "  Error: Dependencies test fail !"
+      echo -e '         "'$sub_cmd'" command should return 0 or "'$exp_retval'"'"\n         but returned value is "'"'$retval'"!' 
+      return 1
+    fi
+   done
+
+  return 0
+}
+
+#bitbake -s 0 ensure that we are in correct directory to get data from bitbake
+DEPENDENCIES_LIST=( "grep --help 0" "grep --help 0" "awk --help 0" "mkdir --help 0" "git --version 0" "find --help 0"  \
+                    "sort --help 0" "pwd -L 0"  "printf bla 0" "tar --help 0" )
+
+
+main() {
+
+  echo -e "\n"
+  
+  VERIFY_ONLY="no"
+  
+    for arg in "$@"; do
+
+        case "$arg" in
+
+          help|--help|-h|\?)
+            help_desc
+            exit 0;
+          ;;
+
+          --version)
+            echo -e "Version: ${VERSION}"
+            exit 0;
+          ;;
+
+          --verify-only|-v)
+            VERIFY_ONLY="yes"
+          ;;
+
+        esac
+    done
+
+    
+    if [ "${VERIFY_ONLY}" == "no" ]; then
+    
+        echo -e "GIT-STRIPER:"
+        
+        echo -e "  DEPENDENCY-TEST:"
+        dependencies_test
+        ret=$?
+        if [ "${ret}" != "0" ]; then  
+            exit 1
+        else
+            echo -e "  >OK\n" 
+        fi
+  
+        echo -e "  Please enter repository's URL:"
+        read -e  -p "  >"  rurl
+
+        echo -e "\n  Please enter TAG:"
+        read -e  -p "  >"  rtag
+        echo -e "\n"
+
+        echo -e "\n  URL:${rurl}\n  TAG:${rtag}\n"
+    
+        tmp="${rurl%%.git*}"; 
+        _repo_name="${tmp##*/}"; 
+    
+        REPO2SEND="${REPO_DEST}/${_repo_name}"
+    
+        git-create "${REPO2SEND}" "${rurl}" "${rtag}"
+        ret_create=$?
+        if [ ! ${ret_create} -eq 0 ]; then
+            echo -e "\n"
+            exit 1
+        fi
+    
+        git-verify "${REPO2SEND}"
+        ret_verify=$?
+        if [ ! ${ret_verify} -eq 0 ]; then
+            echo -e "\n"
+            exit 1
+        fi
+    
+        git-pack "${_repo_name}__${rtag}.tar.xz" "${REPO_DEST}" "${_repo_name}"
+        _ret=$?
+        if [ ! ${_ret} -eq 0 ]; then
+            echo -e "ERROR\n"
+            exit 1
+        fi
+    else
+  
+        echo -e "GIT-STRIPER:[verification-only]" 
+        
+        echo -e "  DEPENDENCY-TEST:"
+        dependencies_test
+        ret=$?
+        if [ "${ret}" != "0" ]; then  
+            exit 1
+        else
+            echo -e "  >OK\n" 
+        fi
+        
+        
+        tmp="${REPO_DEST##*/}"
+        repodirs=$(find "${REPO_DEST}" -maxdepth 1 -type d -not -path "*/${tmp}" )
+        
+        
+        for dir in ${repodirs[@]}; do 
+            git-verify "${dir}"
+            ret_verify=$?
+            if [ ! ${ret_verify} -eq 0 ]; then
+                echo -e "\n"
+                exit 1
+            fi
+        done
+        echo -e "\n"
+    
+    fi
+  
+}
+
+
+main "$@" 
