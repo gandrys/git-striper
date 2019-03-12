@@ -1,9 +1,9 @@
 #!/bin/bash 
 #====================================================================
-# NAME      :   git-striper
+# NAME      :   git-stripper
 # AUTHOR    :   Andrys Jiri
-# DATE      :   2018.12.18
-VERSION='0.1'
+# DATE      :   2019.03.12
+VERSION='0.2'
 #
 # DEPENDENCIES :
 #               Binaries: bash, grep, awk, mkdir, tar, git
@@ -13,8 +13,92 @@ VERSION='0.1'
 
 CURWD=$(pwd)
 #TMPGITDIR="${CURWD}/TMP"
-REPO_DEST="${CURWD}/SEND"
+REPO_DEST="${CURWD}/SEND_TEMP"
+BASH_SCRIPT_DIR=$(cd $(dirname "$0") && pwd )
 
+
+git-remove-checkout-files() {
+    local _git_repo=$1
+    #not exactly bullet proof:TODO make it better ....
+    #just check ".*"
+    
+    if [ -e "${_git_repo}" ]; then
+        tmp=$(cd ${_git_repo} && nowcd=$(pwd); [ "${#nowcd}" > "${#REPO_DEST}" ] && find -maxdepth 1 -name "*" -not -path "./.git" | awk 'FNR>1{print $0}' | xargs -I '{}' rm -fr '{}' )
+        if [ "$(cd "${_git_repo}" && find -maxdepth 1 | awk 'FNR>1{print $0}')" != "./.git" ]; then
+            echo -e     "  ERROR: During removing checkout files "
+            return 1
+        else
+            return 0
+        fi
+    else
+        return 2
+    fi
+   
+}
+
+layer-cpy2bsp-checkout() {
+    local _laydir=$1
+    local _bash_script_dir=$2
+    
+    local _bspyoctolayerdir="${_bash_script_dir}/../../${_laydir##*/}"
+    
+    echo -e "  YOCTO-BSP FOUND:"
+    echo -e "    Do you want to copy ${_repo_name} yocto-layer to current BSP ? [y/n] "
+    read -e  -p "    >"  yn
+    if [  "${yn}" != "y"  ] && [ "${yn}" != "yes"  ]; then
+      return 0            
+    fi
+    
+    #better to let user manually do it, user may realize if layer was somehow modified, than blindly press yess and delete yocto layer ...
+    while true; do
+        if [ -e "${_bspyoctolayerdir}" ]; then            
+            echo -e     "  ERROR: Layer directory "-${_bspyoctolayerdir}-" already do exist in yocto sources directory."
+            echo -e     "         Please remove directory before copying and press enter. "
+            read -e  -p "         >"  bla
+        else
+            break;
+        fi
+    done
+    
+    echo -e "\n    COPYING:"
+    cp -r "${_laydir}" "${_bash_script_dir}/../../"
+    _bla=$?
+    if [ ! "${_bla}" -eq 0 ]; then
+        echo -e "\n    ERROR: cp -r ${_laydir} ${_bash_script_dir}/../../ \n"
+        return 1
+    else
+        git -C "${_bspyoctolayerdir}" checkout -f
+        _bla=$?
+        if [ ! "${_bla}" -eq 0 ]; then
+            echo -e "\n    ERROR: git -C ${_bspyoctolayerdir} checkout -f \n"
+            return 2
+        fi
+        echo -e "    >OK"    
+        echo -e "\n    Please read README related to this external layer and set up BSP ! \n"
+        return 0
+    fi
+    
+}
+
+
+yocto-detected() {
+    local _bash_script_dir=$1
+    
+    #This suppose that structure and position of stripper related to yocto source is always following:
+    # BASH_SCRIPT_DIR=XXX/works/fslbsp/sources/meta-XXX-bsp-release/tools/git-striper.sh
+    istoolsdir="${_bash_script_dir##*/}"
+    ispoky="${_bash_script_dir}/../../poky"
+    
+    #return 0 only if yocto is detected 
+    if [ "${istoolsdir}" != "tools" ]; then
+        return 1
+    elif [ ! -e "${ispoky}" ] ; then
+        return 2
+    else
+        return 0
+    fi
+
+} 
 
 git-pack(){
     local _git_archive_name=$1
@@ -23,7 +107,7 @@ git-pack(){
     
     echo -e "\n  GIT-PACK:"
     if [ -e "${_git_archive_name}" ]; then
-      echo -e "  >REMOVING  -${_git_archive_name}-"
+      echo -e "  >REMOVING:  -${_git_archive_name}-"
       rm -rf "${_git_archive_name}"    
     fi
     
@@ -38,8 +122,6 @@ git-pack(){
       echo -e "  >>OK\n"
       return 0
     fi
-    
-    return 11
     
 }
 
@@ -185,25 +267,42 @@ git-create() {
 
 help_desc() {
 echo -e "\
-  Usage:  git-striper OPTIONS
+  Usage:  git-stripper OPTIONS
 
   Strips all history data from git with exception of one requested commit. 
   Executes verification if data(ignore changes in paths) in checkout directory are the same as in git objects(SHA1-SUM). 
   
-  Asks for URL and TAG of git repository.
+  In case of no arguments, asks for URL and TAG of git repository.
   
   Result is tar.xz archive .
+
+  OPTION: { --url="URL" | -u="URL" }
+  |  > Repository URL
+  |
   
+  OPTION: { --tag="TAG" | -t="TAG" }
+  |  > Repository TAG
+  |
+  
+  OPTION: { -n }
+  |  >  Will not remove temporary directory
+  |
 
   OPTION: { --version }
   |  > Version information
   |
 
-  OPTION: { --verify-only | -v }
-  |  > Run verification. Compare if data in checkout directory are the same as in git objects(SHA1-SUM).Ignore changes in paths.
-  |
 "
 }
+
+# TODO: Wipe it out as uncesessary function ??
+#OPTION: { --verify-only | -v }
+#  |  > Run verification. 
+#  |    Run this command after using -n parameter.
+#  |    Verify if data in checkout directory are the same as in git objects(SHA1-SUM).Ignore changes in paths.
+#  |    Repository will not be fetched, command take a look to the temp ${REPO_DEST} directory.
+#  |
+
 
 dependencies_test() {
   #format: all commands here are in format "CMDNAME SOME_PARAMETERS RETURN_VALUE"
@@ -230,11 +329,15 @@ dependencies_test() {
 }
 
 #bitbake -s 0 ensure that we are in correct directory to get data from bitbake
-DEPENDENCIES_LIST=( "grep --help 0" "grep --help 0" "awk --help 0" "mkdir --help 0" "git --version 0" "find --help 0"  \
+DEPENDENCIES_LIST=( "grep --help 0" "grep --help 0" "awk BEGIN{print} 0" "mkdir --help 0" "git --version 0" "find --help 0"  \
                     "sort --help 0" "pwd -L 0"  "printf bla 0" "tar --help 0" )
 
 
 main() {
+
+unset rurl rtag cpys
+
+TMP_REMOVE="yes"
 
   echo -e "\n"
   
@@ -258,13 +361,26 @@ main() {
             VERIFY_ONLY="yes"
           ;;
 
+          --url=*|-u=*) 
+              rurl="${arg#*=}"
+          ;;
+          
+          --tag=*|-t=*) 
+              rtag="${arg#*=}"
+          ;;
+          
+          -n) 
+              TMP_REMOVE="no"
+          ;;
+          
         esac
     done
-
+    
+    export TMP_REMOVE
     
     if [ "${VERIFY_ONLY}" == "no" ]; then
     
-        echo -e "GIT-STRIPER:"
+        echo -e "GIT-STRIPPER:"
         
         echo -e "  DEPENDENCY-TEST:"
         dependencies_test
@@ -275,13 +391,18 @@ main() {
             echo -e "  >OK\n" 
         fi
   
-        echo -e "  Please enter repository's URL:"
-        read -e  -p "  >"  rurl
-
-        echo -e "\n  Please enter TAG:"
-        read -e  -p "  >"  rtag
-        echo -e "\n"
-
+        if [ -z "${rurl}" ]; then
+            echo -e "  Please enter repository's URL:"
+            read -e  -p "  >"  rurl
+        fi
+        
+        if [ -z "${rtag}" ]; then
+            echo -e "\n  Please enter TAG:"
+            read -e  -p "  >"  rtag
+            echo -e "\n"
+        fi
+        
+        
         echo -e "\n  URL:${rurl}\n  TAG:${rtag}\n"
     
         tmp="${rurl%%.git*}"; 
@@ -293,25 +414,50 @@ main() {
         ret_create=$?
         if [ ! ${ret_create} -eq 0 ]; then
             echo -e "\n"
-            exit 1
+            exit 2
         fi
     
         git-verify "${REPO2SEND}"
         ret_verify=$?
         if [ ! ${ret_verify} -eq 0 ]; then
             echo -e "\n"
-            exit 1
+            exit 3
         fi
-    
-        git-pack "${_repo_name}__${rtag}.tar.xz" "${REPO_DEST}" "${_repo_name}"
+        
+        git-remove-checkout-files "${REPO2SEND}"
         _ret=$?
         if [ ! ${_ret} -eq 0 ]; then
-            echo -e "ERROR\n"
-            exit 1
+            echo -e "\n"
+            exit 4
         fi
+    
+        STRIPPED_TARXZ_NAME="${_repo_name}__${rtag}.tar.xz"  
+        git-pack "${STRIPPED_TARXZ_NAME}" "${REPO_DEST}" "${_repo_name}"
+        _ret=$?
+        if [ ! ${_ret} -eq 0 ]; then
+            echo -e "\n"
+            exit 5
+        fi
+        
+        yocto-detected "${BASH_SCRIPT_DIR}"
+        _ret=$?
+        if [ ${_ret} -eq 0 ]; then
+            layer-cpy2bsp-checkout "${REPO2SEND}" "${BASH_SCRIPT_DIR}"     
+            _ret=$?
+            if [ ! ${_ret} -eq 0 ]; then
+                echo -e "\n"
+                exit 6
+            fi
+        fi
+        
+        
+        if [ "${TMP_REMOVE}" == "yes" ]; then
+            rm -rf ${REPO_DEST}
+        fi
+        
     else
   
-        echo -e "GIT-STRIPER:[verification-only]" 
+        echo -e "GIT-STRIPPER:[verification-only]" 
         
         echo -e "  DEPENDENCY-TEST:"
         dependencies_test
@@ -327,13 +473,18 @@ main() {
         repodirs=$(find "${REPO_DEST}" -maxdepth 1 -type d -not -path "*/${tmp}" )
         
         
-        for dir in ${repodirs[@]}; do 
-            git-verify "${dir}"
+        for gdir in ${repodirs[@]}; do 
+        
+            git -C "${gdir}" checkout -f
+            sleep 2
+            git-verify "${gdir}"
+            
             ret_verify=$?
             if [ ! ${ret_verify} -eq 0 ]; then
                 echo -e "\n"
-                exit 1
+                exit 3
             fi
+            
         done
         echo -e "\n"
     
