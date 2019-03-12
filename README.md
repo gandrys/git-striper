@@ -13,8 +13,8 @@
   * [3.2 Run](#32-run)
 * [4. Dependency List](#4-dependency-list)
 * [5. Examples ](#5-examples)
-  * [5.1 In-house(access to private data), No Input Parameters ](#51-in-house-access-to-private-data-no-input-parameters)
-  * [5.2 In-house(access to private data), Command Line Parameters ](#52-in-house-access-to-private-data-command-line-paramters)
+  * [5.1 In-house(access to private data), No Input Parameters ](#51-in-houseaccess-to-private-data-no-input-parameters)
+  * [5.2 In-house(access to private data), Command Line Parameters ](#52-in-houseaccess-to-private-data-command-line-parameters)
   * [5.3 The 3rd party and stripped git in archive ](#53-the-3rd-party-and-stripped-git-in-archive)
 
 
